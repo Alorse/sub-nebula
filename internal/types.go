@@ -112,8 +112,8 @@ type providerFetchConfig struct {
 }
 
 // Headers to preserve from original request (whitelist approach)
+// NOTE: Authorization is NOT preserved - we always use the token from system credentials
 var preserveHeaders = map[string]bool{
-	"Authorization":     true,
 	"Content-Type":      true,
 	"Content-Length":    true,
 	"Accept":            true,

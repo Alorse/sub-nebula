@@ -136,6 +136,9 @@ func executeProxy(c *gin.Context, ctx *RequestContext) {
 	// Customize the director to properly handle headers
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
+		// Clear Authorization from incoming request before director copies headers
+		// This prevents the client's token from being forwarded
+		c.Request.Header.Del("Authorization")
 		originalDirector(req)
 
 		// Set the correct Host header for the target
@@ -154,16 +157,27 @@ func executeProxy(c *gin.Context, ctx *RequestContext) {
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		// Set authorization only if not provided by client
-		if req.Header.Get("Authorization") == "" && req.Header.Get("x-api-key") == "" {
+		// Set authorization based on token type
+		// API keys (sk-ant-api03-) use x-api-key header
+		// OAuth tokens (sk-ant-oat-) use Authorization: Bearer
+		if strings.HasPrefix(authHeader, "Bearer sk-ant-api03-") {
+			req.Header.Del("Authorization")
+			req.Header.Set("x-api-key", strings.TrimPrefix(authHeader, "Bearer "))
+		} else {
 			req.Header.Set("Authorization", authHeader)
 		}
 
 		// Add provider-specific headers only if not already present
 		switch provider {
 		case ProviderAnthropic:
-			if req.Header.Get("anthropic-beta") == "" {
-				req.Header.Set("anthropic-beta", AnthropicOAuthBeta)
+			// Always ensure oauth-2025-04-20 is in the beta list (required for OAuth tokens)
+			currentBetas := req.Header.Get("anthropic-beta")
+			if !strings.Contains(currentBetas, "oauth-2025-04-20") {
+				if currentBetas == "" {
+					req.Header.Set("anthropic-beta", AnthropicOAuthBeta)
+				} else {
+					req.Header.Set("anthropic-beta", currentBetas+","+AnthropicOAuthBeta)
+				}
 			}
 			if req.Header.Get("anthropic-version") == "" {
 				req.Header.Set("anthropic-version", AnthropicVersion)
