@@ -30,12 +30,34 @@ type Config struct {
 
 // Constants for API headers
 const (
-	AnthropicOAuthBeta    = "oauth-2025-04-20"
-	AnthropicVersion      = "2023-06-01"
-	KimiUserAgent         = "KimiCLI/1.19.0"
-	AuthHeaderAnthropic   = "anthropic"
-	AuthHeaderKimi        = "kimi"
+	AnthropicOAuthBeta  = "oauth-2025-04-20"
+	AnthropicVersion    = "2023-06-01"
+	KimiUserAgent       = "KimiCLI/1.19.0"
+	AuthHeaderAnthropic = "anthropic"
+	AuthHeaderKimi      = "kimi"
 )
+
+// Model represents an API model
+type Model struct {
+	Created  int64  `json:"created"`
+	ID       string `json:"id"`
+	Object   string `json:"object"`
+	OwnedBy  string `json:"owned_by"`
+}
+
+// ModelsResponse represents the /v1/models response
+type ModelsResponse struct {
+	Data   []Model `json:"data"`
+	Object string  `json:"object"`
+}
+
+// Available models with their creation timestamps
+var availableModels = []Model{
+	{Created: 1771372800, ID: "claude-sonnet-4-6", Object: "model", OwnedBy: "anthropic"},
+	{Created: 1770318000, ID: "claude-opus-4-6", Object: "model", OwnedBy: "anthropic"},
+	{Created: 1759276800, ID: "claude-haiku-4-5-20251001", Object: "model", OwnedBy: "anthropic"},
+	{Created: 1773176422, ID: "kimi-for-coding", Object: "model", OwnedBy: "kimi"},
+}
 
 // Claude Code credentials structure
 type ClaudeCredentials struct {
@@ -71,7 +93,7 @@ func main() {
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 
-	// Proxy endpoint - intercepts all requests
+	// Proxy endpoint - intercepts all requests (including /v1/models)
 	r.Any("/v1/*path", handleProxy)
 	r.Any("/v1", handleProxy)
 
@@ -104,6 +126,14 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func handleModels(c *gin.Context) {
+	response := ModelsResponse{
+		Data:   availableModels,
+		Object: "list",
+	}
+	c.JSON(200, response)
+}
+
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -123,6 +153,12 @@ func requestLogger() gin.HandlerFunc {
 }
 
 func handleProxy(c *gin.Context) {
+	// Handle /v1/models endpoint
+	if c.Request.URL.Path == "/v1/models" {
+		handleModels(c)
+		return
+	}
+
 	// Read body to analyze model
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
