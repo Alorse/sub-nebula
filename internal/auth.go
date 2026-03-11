@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"encoding/json"
@@ -12,8 +12,8 @@ import (
 
 var tokenCache TokenCache
 
-// getClaudeToken retrieves the OAuth token from Claude Code's system storage
-func getClaudeToken() (string, error) {
+// GetClaudeToken retrieves the OAuth token from Claude Code's system storage
+func GetClaudeToken() (string, error) {
 	tokenCache.mu.RLock()
 	cachedToken := tokenCache.token
 	cachedExpires := tokenCache.expiresAt

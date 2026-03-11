@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"encoding/json"
@@ -31,7 +31,7 @@ func fetchModelsFromProvider(baseURL, authHeader, userAgent string, provider Pro
 		req.Header.Set("anthropic-version", AnthropicVersion)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func fetchModelsFromProvider(baseURL, authHeader, userAgent string, provider Pro
 	return models, nil
 }
 
-func handleModels(c *gin.Context) {
+func HandleModels(c *gin.Context) {
 	var allModels []Model
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -81,14 +81,14 @@ func handleModels(c *gin.Context) {
 	providers := []providerFetchConfig{
 		{
 			name:     "Anthropic",
-			baseURL:  config.AnthropicBaseURL,
-			authFunc: func() (string, error) { token, err := getClaudeToken(); return "Bearer " + token, err },
+			baseURL:  Config.AnthropicBaseURL,
+			authFunc: func() (string, error) { token, err := GetClaudeToken(); return "Bearer " + token, err },
 			provider: ProviderAnthropic,
 		},
 		{
 			name:      "Kimi",
-			baseURL:   config.KimiBaseURL,
-			authFunc:  func() (string, error) { return "Bearer " + config.KimiAPIKey, nil },
+			baseURL:   Config.KimiBaseURL,
+			authFunc:  func() (string, error) { return "Bearer " + Config.KimiAPIKey, nil },
 			userAgent: KimiUserAgent,
 			provider:  ProviderKimi,
 		},
@@ -135,8 +135,8 @@ func determineTarget(body []byte) (*url.URL, string, error) {
 
 	if err := json.Unmarshal(body, &request); err != nil {
 		// If no model, default to Anthropic
-		targetURL, _ := url.Parse(config.AnthropicBaseURL)
-		token, err := getClaudeToken()
+		targetURL, _ := url.Parse(Config.AnthropicBaseURL)
+		token, err := GetClaudeToken()
 		if err != nil {
 			return nil, "", err
 		}
@@ -147,22 +147,22 @@ func determineTarget(body []byte) (*url.URL, string, error) {
 	fmt.Printf("  📦 Model requested: %s\n", model)
 
 	// If it's the subagent model, go to Kimi
-	if model == config.SubagentModel || strings.HasPrefix(model, "kimi-") {
-		targetURL, err := url.Parse(config.KimiBaseURL)
+	if model == Config.SubagentModel || strings.HasPrefix(model, "kimi-") {
+		targetURL, err := url.Parse(Config.KimiBaseURL)
 		if err != nil {
 			return nil, "", err
 		}
 		fmt.Printf("  🔄 Routing to: Kimi\n")
-		return targetURL, "Bearer " + config.KimiAPIKey, nil
+		return targetURL, "Bearer " + Config.KimiAPIKey, nil
 	}
 
 	// Default: Anthropic (Claude)
-	targetURL, err := url.Parse(config.AnthropicBaseURL)
+	targetURL, err := url.Parse(Config.AnthropicBaseURL)
 	if err != nil {
 		return nil, "", err
 	}
 
-	token, err := getClaudeToken()
+	token, err := GetClaudeToken()
 	if err != nil {
 		return nil, "", err
 	}
@@ -173,12 +173,12 @@ func determineTarget(body []byte) (*url.URL, string, error) {
 
 // getDefaultAnthropicTarget returns the default Anthropic target for GET requests
 func getDefaultAnthropicTarget() (*url.URL, string, error) {
-	targetURL, err := url.Parse(config.AnthropicBaseURL)
+	targetURL, err := url.Parse(Config.AnthropicBaseURL)
 	if err != nil {
 		return nil, "", err
 	}
 
-	token, err := getClaudeToken()
+	token, err := GetClaudeToken()
 	if err != nil {
 		return nil, "", err
 	}

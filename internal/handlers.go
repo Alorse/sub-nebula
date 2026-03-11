@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"bytes"
@@ -12,10 +12,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func handleProxy(c *gin.Context) {
+func HandleProxy(c *gin.Context) {
 	// Handle /v1/models endpoint
 	if c.Request.URL.Path == "/v1/models" {
-		handleModels(c)
+		HandleModels(c)
 		return
 	}
 

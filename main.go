@@ -2,29 +2,13 @@ package main
 
 import (
 	"fmt"
-	"net/http"
 	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"sub-nebula/internal"
 )
-
-// Shared transport for connection reuse (singleton pattern - prevents OOM from connection pool)
-var sharedTransport = &http.Transport{
-	MaxIdleConns:        100,
-	MaxIdleConnsPerHost: 100,
-	IdleConnTimeout:     90 * time.Second,
-	ForceAttemptHTTP2:   true, // Ensure HTTP/2 support for Anthropic
-}
-
-// Shared HTTP client
-var httpClient = &http.Client{
-	Transport: sharedTransport,
-	Timeout:   10 * time.Second,
-}
-
-var config Config
 
 func main() {
 	// Load .env file if it exists
@@ -40,29 +24,29 @@ func main() {
 	r.Use(requestLogger())
 
 	// Proxy endpoint - intercepts all requests (including /v1/models)
-	r.Any("/v1/*path", handleProxy)
-	r.Any("/v1", handleProxy)
+	r.Any("/v1/*path", internal.HandleProxy)
+	r.Any("/v1", internal.HandleProxy)
 
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	fmt.Printf("🚀 Sub-Nebula proxy started on http://localhost:%s\n", config.Port)
-	fmt.Printf("📍 Anthropic API: %s\n", config.AnthropicBaseURL)
-	fmt.Printf("📍 Kimi API: %s\n", config.KimiBaseURL)
-	fmt.Printf("🤖 Subagent model: %s\n", config.SubagentModel)
+	fmt.Printf("🚀 Sub-Nebula proxy started on http://localhost:%s\n", internal.Config.Port)
+	fmt.Printf("📍 Anthropic API: %s\n", internal.Config.AnthropicBaseURL)
+	fmt.Printf("📍 Kimi API: %s\n", internal.Config.KimiBaseURL)
+	fmt.Printf("🤖 Subagent model: %s\n", internal.Config.SubagentModel)
 
-	r.Run(":" + config.Port)
+	r.Run(":" + internal.Config.Port)
 }
 
 func loadConfig() {
-	config.Port = getEnv("PORT", "4242")
+	internal.Config.Port = getEnv("PORT", "4242")
 	// Force correct Anthropic URL - ignore env var that may be contaminated
-	config.AnthropicBaseURL = "https://api.anthropic.com"
-	config.KimiBaseURL = getEnv("KIMI_BASE_URL", "https://api.kimi.com/coding")
-	config.KimiAPIKey = getEnv("KIMI_API_KEY", "")
-	config.SubagentModel = getEnv("SUBAGENT_MODEL", "kimi-for-coding")
+	internal.Config.AnthropicBaseURL = "https://api.anthropic.com"
+	internal.Config.KimiBaseURL = getEnv("KIMI_BASE_URL", "https://api.kimi.com/coding")
+	internal.Config.KimiAPIKey = getEnv("KIMI_API_KEY", "")
+	internal.Config.SubagentModel = getEnv("SUBAGENT_MODEL", "kimi-for-coding")
 }
 
 func getEnv(key, defaultValue string) string {

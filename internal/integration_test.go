@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"net/http"
@@ -12,16 +12,15 @@ import (
 func setupIntegrationRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(requestLogger())
 
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Proxy endpoints - handleProxy routes internally to models
-	r.Any("/v1/*path", handleProxy)
-	r.Any("/v1", handleProxy)
+	// Proxy endpoints - HandleProxy routes internally to models
+	r.Any("/v1/*path", HandleProxy)
+	r.Any("/v1", HandleProxy)
 
 	return r
 }
@@ -34,7 +33,7 @@ func TestProxy_KimiRouting(t *testing.T) {
 	}
 
 	// Skip if no Kimi API key
-	if config.KimiAPIKey == "" {
+	if Config.KimiAPIKey == "" {
 		t.Skip("Skipping: KIMI_API_KEY not configured")
 	}
 

@@ -1,18 +1,29 @@
-package main
+package internal
 
 import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 )
 
-// Proxy configuration
-type Config struct {
+// HTTPClient is the shared HTTP client for all requests
+var HTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+}
+
+// Config holds the application configuration
+var Config = struct {
 	Port             string
 	AnthropicBaseURL string
 	KimiBaseURL      string
 	KimiAPIKey       string
 	SubagentModel    string
+}{
+	Port:             "4242",
+	AnthropicBaseURL: "https://api.anthropic.com",
+	KimiBaseURL:      "https://api.kimi.com/coding",
+	SubagentModel:    "kimi-for-coding",
 }
 
 // Constants for API headers
