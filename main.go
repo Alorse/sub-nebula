@@ -62,13 +62,14 @@ func main() {
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 
+	// Proxy endpoint - intercepts all requests
+	r.Any("/v1/*path", handleProxy)
+	r.Any("/v1", handleProxy)
+
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
-
-	// Proxy endpoint - intercepts all requests
-	r.Any("/*path", handleProxy)
 
 	fmt.Printf("🚀 Sub-Nebula proxy started on http://localhost:%s\n", config.Port)
 	fmt.Printf("📍 Anthropic API: %s\n", config.AnthropicBaseURL)
@@ -80,8 +81,9 @@ func main() {
 
 func loadConfig() {
 	config.Port = getEnv("PORT", "4242")
-	config.AnthropicBaseURL = getEnv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-	config.KimiBaseURL = getEnv("KIMI_BASE_URL", "https://api.kimi.com/coding/")
+	// Force correct Anthropic URL - ignore env var that may be contaminated
+	config.AnthropicBaseURL = "https://api.anthropic.com"
+	config.KimiBaseURL = getEnv("KIMI_BASE_URL", "https://api.kimi.com/coding")
 	config.KimiAPIKey = getEnv("KIMI_API_KEY", "")
 	config.SubagentModel = getEnv("SUBAGENT_MODEL", "kimi-for-coding")
 }
@@ -118,7 +120,8 @@ func handleProxy(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "cannot read body"})
 		return
 	}
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	// Restore body for potential re-reads
+	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	// Determine target model
 	targetURL, authHeader, err := determineTarget(bodyBytes)
@@ -127,36 +130,70 @@ func handleProxy(c *gin.Context) {
 		return
 	}
 
-	// Create reverse proxy
+	// Use httputil.ReverseProxy for proper HTTP proxying
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-	// Modify director to add authentication
+	// Customize the director to properly handle headers
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 
-		// Clean host headers to avoid issues
+		// Set the correct Host header for the target
 		req.Host = targetURL.Host
 
-		// Add authentication
-		req.Header.Set("Authorization", authHeader)
+		// Copy all headers from original request
+		for key, values := range c.Request.Header {
+			for _, value := range values {
+				req.Header.Set(key, value)
+			}
+		}
 
 		// Ensure content-type
 		if req.Header.Get("Content-Type") == "" {
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		// Debug
-		fmt.Printf("  → Proxying to: %s%s\n", targetURL.Host, req.URL.Path)
+		// Set authorization (use original if provided, otherwise use determined)
+		if req.Header.Get("Authorization") == "" {
+			req.Header.Set("Authorization", authHeader)
+		}
+
+		// Add Anthropic API headers for OAuth tokens
+		if strings.Contains(targetURL.Host, "anthropic.com") {
+			if req.Header.Get("anthropic-beta") == "" {
+				req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+			}
+			if req.Header.Get("anthropic-version") == "" {
+				req.Header.Set("anthropic-version", "2023-06-01")
+			}
+		}
+
+		// Ensure body is set with proper content length
+		if len(bodyBytes) > 0 {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			req.ContentLength = int64(len(bodyBytes))
+		}
+
+		// Debug logging
+		fmt.Printf("  → Proxying to: %s%s\n", targetURL.Host, c.Request.URL.Path)
+		auth := req.Header.Get("Authorization")
+		if len(auth) > 30 {
+			fmt.Printf("  → Auth header: %s...\n", auth[:30])
+		} else {
+			fmt.Printf("  → Auth header: %s\n", auth)
+		}
+		fmt.Printf("  → anthropic-beta: %s\n", req.Header.Get("anthropic-beta"))
+		fmt.Printf("  → anthropic-version: %s\n", req.Header.Get("anthropic-version"))
+		fmt.Printf("  → Content-Length: %d\n", req.ContentLength)
 	}
 
-	// Handle proxy errors
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+	// Handle errors
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 		fmt.Printf("  ✗ Proxy error: %v\n", err)
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(gin.H{"error": "proxy error", "details": err.Error()})
+		c.JSON(502, gin.H{"error": "proxy error", "details": err.Error()})
 	}
 
+	// Execute the proxy
 	proxy.ServeHTTP(c.Writer, c.Request)
 }
 
