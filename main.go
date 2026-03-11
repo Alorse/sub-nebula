@@ -168,6 +168,11 @@ func handleProxy(c *gin.Context) {
 			}
 		}
 
+		// Add Kimi User-Agent header when routing to Kimi
+		if strings.Contains(targetURL.Host, "kimi.com") {
+			req.Header.Set("User-Agent", "KimiCLI/1.19.0")
+		}
+
 		// Ensure body is set with proper content length
 		if len(bodyBytes) > 0 {
 			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -184,6 +189,7 @@ func handleProxy(c *gin.Context) {
 		}
 		fmt.Printf("  → anthropic-beta: %s\n", req.Header.Get("anthropic-beta"))
 		fmt.Printf("  → anthropic-version: %s\n", req.Header.Get("anthropic-version"))
+		fmt.Printf("  → User-Agent: %s\n", req.Header.Get("User-Agent"))
 		fmt.Printf("  → Content-Length: %d\n", req.ContentLength)
 	}
 
