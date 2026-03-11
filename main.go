@@ -28,6 +28,15 @@ type Config struct {
 	SubagentModel    string
 }
 
+// Constants for API headers
+const (
+	AnthropicOAuthBeta    = "oauth-2025-04-20"
+	AnthropicVersion      = "2023-06-01"
+	KimiUserAgent         = "KimiCLI/1.19.0"
+	AuthHeaderAnthropic   = "anthropic"
+	AuthHeaderKimi        = "kimi"
+)
+
 // Claude Code credentials structure
 type ClaudeCredentials struct {
 	ClaudeAiOauth struct {
@@ -133,6 +142,12 @@ func handleProxy(c *gin.Context) {
 	// Use httputil.ReverseProxy for proper HTTP proxying
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
+	// Determine provider type once to avoid repeated string matching
+	provider := AuthHeaderAnthropic
+	if strings.Contains(targetURL.Host, "kimi.com") {
+		provider = AuthHeaderKimi
+	}
+
 	// Customize the director to properly handle headers
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -140,13 +155,6 @@ func handleProxy(c *gin.Context) {
 
 		// Set the correct Host header for the target
 		req.Host = targetURL.Host
-
-		// Copy all headers from original request
-		for key, values := range c.Request.Header {
-			for _, value := range values {
-				req.Header.Set(key, value)
-			}
-		}
 
 		// Ensure content-type
 		if req.Header.Get("Content-Type") == "" {
@@ -158,25 +166,16 @@ func handleProxy(c *gin.Context) {
 			req.Header.Set("Authorization", authHeader)
 		}
 
-		// Add Anthropic API headers for OAuth tokens
-		if strings.Contains(targetURL.Host, "anthropic.com") {
+		// Add provider-specific headers
+		if provider == AuthHeaderAnthropic {
 			if req.Header.Get("anthropic-beta") == "" {
-				req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+				req.Header.Set("anthropic-beta", AnthropicOAuthBeta)
 			}
 			if req.Header.Get("anthropic-version") == "" {
-				req.Header.Set("anthropic-version", "2023-06-01")
+				req.Header.Set("anthropic-version", AnthropicVersion)
 			}
-		}
-
-		// Add Kimi User-Agent header when routing to Kimi
-		if strings.Contains(targetURL.Host, "kimi.com") {
-			req.Header.Set("User-Agent", "KimiCLI/1.19.0")
-		}
-
-		// Ensure body is set with proper content length
-		if len(bodyBytes) > 0 {
-			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			req.ContentLength = int64(len(bodyBytes))
+		} else if provider == AuthHeaderKimi {
+			req.Header.Set("User-Agent", KimiUserAgent)
 		}
 
 		// Debug logging
