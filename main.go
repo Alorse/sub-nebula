@@ -43,8 +43,19 @@ const (
 	ProviderKimi      ProviderType = "kimi"
 )
 
-// Shared HTTP client with timeout for connection reuse
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+// Shared transport for connection reuse (singleton pattern - prevents OOM from connection pool)
+var sharedTransport = &http.Transport{
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 100,
+	IdleConnTimeout:     90 * time.Second,
+	ForceAttemptHTTP2:   true, // Ensure HTTP/2 support for Anthropic
+}
+
+// Shared HTTP client
+var httpClient = &http.Client{
+	Transport: sharedTransport,
+	Timeout:   10 * time.Second,
+}
 
 // Model represents an API model
 type Model struct {
@@ -282,6 +293,39 @@ func requestLogger() gin.HandlerFunc {
 	}
 }
 
+// Headers to preserve from original request (whitelist approach)
+var preserveHeaders = map[string]bool{
+	"Authorization":     true,
+	"Content-Type":      true,
+	"Content-Length":    true,
+	"Accept":            true,
+	"Accept-Encoding":   true,
+	"Accept-Language":   true,
+	"Cache-Control":     true,
+	"Connection":        true,
+	"User-Agent":        true,
+	"X-Request-ID":      true,
+	"X-Correlation-ID":  true,
+	"anthropic-beta":    true,
+	"anthropic-version": true,
+	"anthropic-client":  true,
+	"x-api-key":         true,
+}
+
+// ProxyTarget holds the resolved target for a request
+type ProxyTarget struct {
+	URL        *url.URL
+	AuthHeader string
+	Provider   ProviderType
+}
+
+// RequestContext holds all context needed for proxying a request
+type RequestContext struct {
+	OriginalHeaders http.Header
+	BodyBytes       []byte
+	Target          *ProxyTarget
+}
+
 func handleProxy(c *gin.Context) {
 	// Handle /v1/models endpoint
 	if c.Request.URL.Path == "/v1/models" {
@@ -289,32 +333,119 @@ func handleProxy(c *gin.Context) {
 		return
 	}
 
-	// Read body to analyze model
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	// Route based on HTTP method
+	switch c.Request.Method {
+	case http.MethodGet:
+		handleGetRequest(c)
+	case http.MethodPost:
+		handlePostRequest(c)
+	default:
+		// For other methods (PUT, DELETE, PATCH), use POST handler logic
+		handlePostRequest(c)
+	}
+}
+
+// handleGetRequest proxies GET requests (typically for fetching data)
+func handleGetRequest(c *gin.Context) {
+	ctx, err := buildRequestContext(c)
 	if err != nil {
-		c.JSON(400, gin.H{"error": "cannot read body"})
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	// Restore body for potential re-reads
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	// Determine target model
-	targetURL, authHeader, err := determineTarget(bodyBytes)
+	// GET requests don't have a body to analyze, default to Anthropic
+	targetURL, authHeader, err := getDefaultAnthropicTarget()
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Use httputil.ReverseProxy for proper HTTP proxying
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-	// Determine provider type once to avoid repeated string matching
-	var provider ProviderType
+	provider := ProviderAnthropic
 	if strings.Contains(targetURL.Host, "kimi.com") {
 		provider = ProviderKimi
-	} else {
-		provider = ProviderAnthropic
 	}
+
+	ctx.Target = &ProxyTarget{
+		URL:        targetURL,
+		AuthHeader: authHeader,
+		Provider:   provider,
+	}
+
+	executeProxy(c, ctx)
+}
+
+// handlePostRequest proxies POST requests (typically for chat completions)
+func handlePostRequest(c *gin.Context) {
+	ctx, err := buildRequestContext(c)
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Determine target based on model in body
+	targetURL, authHeader, err := determineTarget(ctx.BodyBytes)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	provider := ProviderAnthropic
+	if strings.Contains(targetURL.Host, "kimi.com") {
+		provider = ProviderKimi
+	}
+
+	ctx.Target = &ProxyTarget{
+		URL:        targetURL,
+		AuthHeader: authHeader,
+		Provider:   provider,
+	}
+
+	executeProxy(c, ctx)
+}
+
+// buildRequestContext extracts and preserves request context
+func buildRequestContext(c *gin.Context) (*RequestContext, error) {
+	// Read body for potential analysis
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read body: %w", err)
+	}
+	// Restore body for proxying
+	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	// Capture original headers before Gin modifies them
+	originalHeaders := make(http.Header)
+	for key, values := range c.Request.Header {
+		if preserveHeaders[key] {
+			originalHeaders[key] = values
+		}
+	}
+
+	// Debug: log incoming request headers
+	if os.Getenv("DEBUG") == "1" {
+		fmt.Printf("  [DEBUG] Incoming headers:\n")
+		for key, values := range c.Request.Header {
+			for _, v := range values {
+				fmt.Printf("  [DEBUG]   %s: %s\n", key, v)
+			}
+		}
+	}
+
+	return &RequestContext{
+		OriginalHeaders: originalHeaders,
+		BodyBytes:       bodyBytes,
+	}, nil
+}
+
+// executeProxy performs the actual proxying
+func executeProxy(c *gin.Context, ctx *RequestContext) {
+	targetURL := ctx.Target.URL
+	authHeader := ctx.Target.AuthHeader
+	provider := ctx.Target.Provider
+	originalHeaders := ctx.OriginalHeaders
+
+	// Use httputil.ReverseProxy for proper HTTP proxying
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
 	// Customize the director to properly handle headers
 	originalDirector := proxy.Director
@@ -324,17 +455,25 @@ func handleProxy(c *gin.Context) {
 		// Set the correct Host header for the target
 		req.Host = targetURL.Host
 
-		// Ensure content-type
+		// Restore original headers (whitelist approach - only preserve known headers)
+		for key, values := range originalHeaders {
+			// Don't overwrite if already set by originalDirector
+			if _, exists := req.Header[key]; !exists && len(values) > 0 {
+				req.Header[key] = values
+			}
+		}
+
+		// Ensure content-type if not present
 		if req.Header.Get("Content-Type") == "" {
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		// Set authorization (use original if provided, otherwise use determined)
-		if req.Header.Get("Authorization") == "" {
+		// Set authorization only if not provided by client
+		if req.Header.Get("Authorization") == "" && req.Header.Get("x-api-key") == "" {
 			req.Header.Set("Authorization", authHeader)
 		}
 
-		// Add provider-specific headers
+		// Add provider-specific headers only if not already present
 		switch provider {
 		case ProviderAnthropic:
 			if req.Header.Get("anthropic-beta") == "" {
@@ -344,10 +483,22 @@ func handleProxy(c *gin.Context) {
 				req.Header.Set("anthropic-version", AnthropicVersion)
 			}
 		case ProviderKimi:
-			req.Header.Set("User-Agent", KimiUserAgent)
+			if req.Header.Get("User-Agent") == "" {
+				req.Header.Set("User-Agent", KimiUserAgent)
+			}
 		}
 
-		// Debug logging
+		// Debug: log outgoing request headers
+		if os.Getenv("DEBUG") == "1" {
+			fmt.Printf("  [DEBUG] Outgoing headers:\n")
+			for key, values := range req.Header {
+				for _, v := range values {
+					fmt.Printf("  [DEBUG]   %s: %s\n", key, v)
+				}
+			}
+		}
+
+		// Standard logging
 		fmt.Printf("  → Proxying to: %s%s\n", targetURL.Host, c.Request.URL.Path)
 		auth := req.Header.Get("Authorization")
 		if len(auth) > 30 {
@@ -369,6 +520,21 @@ func handleProxy(c *gin.Context) {
 
 	// Execute the proxy
 	proxy.ServeHTTP(c.Writer, c.Request)
+}
+
+// getDefaultAnthropicTarget returns the default Anthropic target for GET requests
+func getDefaultAnthropicTarget() (*url.URL, string, error) {
+	targetURL, err := url.Parse(config.AnthropicBaseURL)
+	if err != nil {
+		return nil, "", err
+	}
+
+	token, err := getClaudeToken()
+	if err != nil {
+		return nil, "", err
+	}
+
+	return targetURL, "Bearer " + token, nil
 }
 
 func determineTarget(body []byte) (*url.URL, string, error) {

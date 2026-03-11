@@ -134,6 +134,16 @@ func TestDetermineTarget_InvalidJSON(t *testing.T) {
 	assert.True(t, strings.HasPrefix(authHeader, "Bearer ") || authHeader == "")
 }
 
+func TestGetDefaultAnthropicTarget(t *testing.T) {
+	targetURL, authHeader, err := getDefaultAnthropicTarget()
+
+	require.NoError(t, err)
+	assert.True(t, strings.Contains(targetURL.Host, "anthropic.com"))
+	assert.Equal(t, "https://api.anthropic.com", targetURL.String())
+	// Auth header should be empty or start with Bearer (depends on credentials availability)
+	assert.True(t, authHeader == "" || strings.HasPrefix(authHeader, "Bearer "))
+}
+
 func TestProviderModel_TimestampParsing(t *testing.T) {
 	// Test with Unix timestamp
 	pm1 := ProviderModel{
