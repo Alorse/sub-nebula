@@ -39,10 +39,20 @@ const (
 
 // Model represents an API model
 type Model struct {
-	Created  int64  `json:"created"`
-	ID       string `json:"id"`
-	Object   string `json:"object"`
-	OwnedBy  string `json:"owned_by"`
+	Created int64  `json:"created"`
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	OwnedBy string `json:"owned_by"`
+}
+
+// ProviderModel represents a model from a provider's API (format varies)
+type ProviderModel struct {
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Object      string `json:"object"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   string `json:"created_at"`
+	Created     int64  `json:"created"`
 }
 
 // ModelsResponse represents the /v1/models response
@@ -51,12 +61,71 @@ type ModelsResponse struct {
 	Object string  `json:"object"`
 }
 
-// Available models with their creation timestamps
-var availableModels = []Model{
-	{Created: 1771372800, ID: "claude-sonnet-4-6", Object: "model", OwnedBy: "anthropic"},
-	{Created: 1770318000, ID: "claude-opus-4-6", Object: "model", OwnedBy: "anthropic"},
-	{Created: 1759276800, ID: "claude-haiku-4-5-20251001", Object: "model", OwnedBy: "anthropic"},
-	{Created: 1773176422, ID: "kimi-for-coding", Object: "model", OwnedBy: "kimi"},
+// ProviderModelsResponse represents a provider's response format
+type ProviderModelsResponse struct {
+	Data   []ProviderModel `json:"data"`
+	Object string          `json:"object"`
+}
+
+// fetchModelsFromProvider fetches models from a provider's /v1/models endpoint
+func fetchModelsFromProvider(baseURL, authHeader, userAgent, ownedBy string) ([]Model, error) {
+	req, err := http.NewRequest("GET", baseURL+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", authHeader)
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+
+	// Add Anthropic-specific headers for OAuth
+	if ownedBy == "anthropic" {
+		req.Header.Set("anthropic-beta", AnthropicOAuthBeta)
+		req.Header.Set("anthropic-version", AnthropicVersion)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("provider returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var providerResp ProviderModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&providerResp); err != nil {
+		return nil, err
+	}
+
+	// Normalize provider models to our Model format
+	var models []Model
+	for _, pm := range providerResp.Data {
+		model := Model{
+			ID:      pm.ID,
+			Object:  "model",
+			OwnedBy: ownedBy,
+		}
+
+		// Handle different timestamp formats
+		if pm.Created > 0 {
+			model.Created = pm.Created
+		} else if pm.CreatedAt != "" {
+			// Parse ISO 8601 timestamp
+			t, err := time.Parse(time.RFC3339, pm.CreatedAt)
+			if err == nil {
+				model.Created = t.Unix()
+			}
+		}
+
+		models = append(models, model)
+	}
+
+	return models, nil
 }
 
 // Claude Code credentials structure
@@ -127,8 +196,53 @@ func getEnv(key, defaultValue string) string {
 }
 
 func handleModels(c *gin.Context) {
+	var allModels []Model
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Fetch from Anthropic
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		token, err := getClaudeToken()
+		if err != nil {
+			fmt.Printf("  ⚠️ Failed to get Claude token: %v\n", err)
+			return
+		}
+		models, err := fetchModelsFromProvider(config.AnthropicBaseURL, "Bearer "+token, "", "anthropic")
+		if err != nil {
+			fmt.Printf("  ⚠️ Failed to fetch Anthropic models: %v\n", err)
+			return
+		}
+		mu.Lock()
+		allModels = append(allModels, models...)
+		mu.Unlock()
+		fmt.Printf("  ✓ Fetched %d models from Anthropic\n", len(models))
+	}()
+
+	// Fetch from Kimi
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if config.KimiAPIKey == "" {
+			fmt.Printf("  ⚠️ Kimi API key not configured\n")
+			return
+		}
+		models, err := fetchModelsFromProvider(config.KimiBaseURL, "Bearer "+config.KimiAPIKey, KimiUserAgent, "kimi")
+		if err != nil {
+			fmt.Printf("  ⚠️ Failed to fetch Kimi models: %v\n", err)
+			return
+		}
+		mu.Lock()
+		allModels = append(allModels, models...)
+		mu.Unlock()
+		fmt.Printf("  ✓ Fetched %d models from Kimi\n", len(models))
+	}()
+
+	wg.Wait()
+
 	response := ModelsResponse{
-		Data:   availableModels,
+		Data:   allModels,
 		Object: "list",
 	}
 	c.JSON(200, response)
