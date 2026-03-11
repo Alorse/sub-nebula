@@ -31,17 +31,19 @@ claude
 
 ## How It Works
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│ Claude Code │────▶│ Sub-Nebula   │────▶│ Anthropic API   │
-│             │     │ Proxy :4242  │     │ (Claude models) │
-└─────────────┘     └──────────────┘     └─────────────────┘
-                           │
-                           ▼
-                    ┌──────────────┐
-                    │ Kimi API     │
-                    │ (subagents)  │
-                    └──────────────┘
+```mermaid
+flowchart LR
+    A[Claude Code] --> B[SubNebula]
+
+    B --> C{Is Subagent Task?}
+
+    C -->|No| D[Claude Models]
+    C -->|Yes| E[Kimi Model API]
+
+    D --> F[Response]
+    E --> F
+
+    F --> A
 ```
 
 Routing logic:
