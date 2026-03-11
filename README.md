@@ -12,7 +12,7 @@ cp .env.example .env
 # Edit .env: KIMI_API_KEY=sk-kimi-xxx
 
 # 2. Start proxy
-go run main.go
+go run .
 
 # 3. Configure Claude Code
 cat > ~/.claude/settings.json << 'EOF'
