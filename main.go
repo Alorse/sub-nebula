@@ -30,12 +30,21 @@ type Config struct {
 
 // Constants for API headers
 const (
-	AnthropicOAuthBeta  = "oauth-2025-04-20"
-	AnthropicVersion    = "2023-06-01"
-	KimiUserAgent       = "KimiCLI/1.19.0"
-	AuthHeaderAnthropic = "anthropic"
-	AuthHeaderKimi      = "kimi"
+	AnthropicOAuthBeta = "oauth-2025-04-20"
+	AnthropicVersion   = "2023-06-01"
+	KimiUserAgent      = "KimiCLI/1.19.0"
 )
+
+// ProviderType represents the type of API provider
+type ProviderType string
+
+const (
+	ProviderAnthropic ProviderType = "anthropic"
+	ProviderKimi      ProviderType = "kimi"
+)
+
+// Shared HTTP client with timeout for connection reuse
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // Model represents an API model
 type Model struct {
@@ -46,13 +55,11 @@ type Model struct {
 }
 
 // ProviderModel represents a model from a provider's API (format varies)
+// Different providers use different field names for timestamps
 type ProviderModel struct {
-	ID          string `json:"id"`
-	Type        string `json:"type"`
-	Object      string `json:"object"`
-	DisplayName string `json:"display_name"`
-	CreatedAt   string `json:"created_at"`
-	Created     int64  `json:"created"`
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"` // ISO 8601 format (Anthropic)
+	Created   int64  `json:"created"`    // Unix timestamp (Kimi)
 }
 
 // ModelsResponse represents the /v1/models response
@@ -68,7 +75,7 @@ type ProviderModelsResponse struct {
 }
 
 // fetchModelsFromProvider fetches models from a provider's /v1/models endpoint
-func fetchModelsFromProvider(baseURL, authHeader, userAgent, ownedBy string) ([]Model, error) {
+func fetchModelsFromProvider(baseURL, authHeader, userAgent string, provider ProviderType) ([]Model, error) {
 	req, err := http.NewRequest("GET", baseURL+"/v1/models", nil)
 	if err != nil {
 		return nil, err
@@ -80,19 +87,18 @@ func fetchModelsFromProvider(baseURL, authHeader, userAgent, ownedBy string) ([]
 	}
 
 	// Add Anthropic-specific headers for OAuth
-	if ownedBy == "anthropic" {
+	if provider == ProviderAnthropic {
 		req.Header.Set("anthropic-beta", AnthropicOAuthBeta)
 		req.Header.Set("anthropic-version", AnthropicVersion)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("provider returned status %d: %s", resp.StatusCode, string(body))
 	}
@@ -102,22 +108,21 @@ func fetchModelsFromProvider(baseURL, authHeader, userAgent, ownedBy string) ([]
 		return nil, err
 	}
 
-	// Normalize provider models to our Model format
-	var models []Model
+	// Pre-allocate slice with known capacity
+	models := make([]Model, 0, len(providerResp.Data))
 	for _, pm := range providerResp.Data {
 		model := Model{
 			ID:      pm.ID,
 			Object:  "model",
-			OwnedBy: ownedBy,
+			OwnedBy: string(provider),
 		}
 
 		// Handle different timestamp formats
-		if pm.Created > 0 {
+		switch {
+		case pm.Created > 0:
 			model.Created = pm.Created
-		} else if pm.CreatedAt != "" {
-			// Parse ISO 8601 timestamp
-			t, err := time.Parse(time.RFC3339, pm.CreatedAt)
-			if err == nil {
+		case pm.CreatedAt != "":
+			if t, err := time.Parse(time.RFC3339, pm.CreatedAt); err == nil {
 				model.Created = t.Unix()
 			}
 		}
@@ -195,49 +200,60 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+// providerFetchConfig holds configuration for fetching from a provider
+type providerFetchConfig struct {
+	name      string
+	baseURL   string
+	authFunc  func() (string, error)
+	userAgent string
+	provider  ProviderType
+}
+
 func handleModels(c *gin.Context) {
 	var allModels []Model
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	// Fetch from Anthropic
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		token, err := getClaudeToken()
-		if err != nil {
-			fmt.Printf("  ⚠️ Failed to get Claude token: %v\n", err)
-			return
-		}
-		models, err := fetchModelsFromProvider(config.AnthropicBaseURL, "Bearer "+token, "", "anthropic")
-		if err != nil {
-			fmt.Printf("  ⚠️ Failed to fetch Anthropic models: %v\n", err)
-			return
-		}
-		mu.Lock()
-		allModels = append(allModels, models...)
-		mu.Unlock()
-		fmt.Printf("  ✓ Fetched %d models from Anthropic\n", len(models))
-	}()
+	// Define provider configurations
+	providers := []providerFetchConfig{
+		{
+			name:     "Anthropic",
+			baseURL:  config.AnthropicBaseURL,
+			authFunc: func() (string, error) { token, err := getClaudeToken(); return "Bearer " + token, err },
+			provider: ProviderAnthropic,
+		},
+		{
+			name:      "Kimi",
+			baseURL:   config.KimiBaseURL,
+			authFunc:  func() (string, error) { return "Bearer " + config.KimiAPIKey, nil },
+			userAgent: KimiUserAgent,
+			provider:  ProviderKimi,
+		},
+	}
 
-	// Fetch from Kimi
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if config.KimiAPIKey == "" {
-			fmt.Printf("  ⚠️ Kimi API key not configured\n")
-			return
-		}
-		models, err := fetchModelsFromProvider(config.KimiBaseURL, "Bearer "+config.KimiAPIKey, KimiUserAgent, "kimi")
-		if err != nil {
-			fmt.Printf("  ⚠️ Failed to fetch Kimi models: %v\n", err)
-			return
-		}
-		mu.Lock()
-		allModels = append(allModels, models...)
-		mu.Unlock()
-		fmt.Printf("  ✓ Fetched %d models from Kimi\n", len(models))
-	}()
+	for _, p := range providers {
+		wg.Add(1)
+		go func(cfg providerFetchConfig) {
+			defer wg.Done()
+
+			authHeader, err := cfg.authFunc()
+			if err != nil {
+				fmt.Printf("  ⚠️ Failed to get %s credentials: %v\n", cfg.name, err)
+				return
+			}
+
+			models, err := fetchModelsFromProvider(cfg.baseURL, authHeader, cfg.userAgent, cfg.provider)
+			if err != nil {
+				fmt.Printf("  ⚠️ Failed to fetch %s models: %v\n", cfg.name, err)
+				return
+			}
+
+			mu.Lock()
+			allModels = append(allModels, models...)
+			mu.Unlock()
+			fmt.Printf("  ✓ Fetched %d models from %s\n", len(models), cfg.name)
+		}(p)
+	}
 
 	wg.Wait()
 
@@ -245,7 +261,7 @@ func handleModels(c *gin.Context) {
 		Data:   allModels,
 		Object: "list",
 	}
-	c.JSON(200, response)
+	c.JSON(http.StatusOK, response)
 }
 
 func requestLogger() gin.HandlerFunc {
@@ -293,9 +309,11 @@ func handleProxy(c *gin.Context) {
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
 	// Determine provider type once to avoid repeated string matching
-	provider := AuthHeaderAnthropic
+	var provider ProviderType
 	if strings.Contains(targetURL.Host, "kimi.com") {
-		provider = AuthHeaderKimi
+		provider = ProviderKimi
+	} else {
+		provider = ProviderAnthropic
 	}
 
 	// Customize the director to properly handle headers
@@ -317,14 +335,15 @@ func handleProxy(c *gin.Context) {
 		}
 
 		// Add provider-specific headers
-		if provider == AuthHeaderAnthropic {
+		switch provider {
+		case ProviderAnthropic:
 			if req.Header.Get("anthropic-beta") == "" {
 				req.Header.Set("anthropic-beta", AnthropicOAuthBeta)
 			}
 			if req.Header.Get("anthropic-version") == "" {
 				req.Header.Set("anthropic-version", AnthropicVersion)
 			}
-		} else if provider == AuthHeaderKimi {
+		case ProviderKimi:
 			req.Header.Set("User-Agent", KimiUserAgent)
 		}
 
